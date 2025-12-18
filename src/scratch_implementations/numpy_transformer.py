@@ -188,3 +188,70 @@ class TransformerBlockNumPy:
         x = self.ln2.forward(x)
         
         return x
+
+
+
+class GPT_Inference:
+    def __init__(self, vocab_size=50257, d_model=768, n_layer=12, n_head=12, block_size=1024):
+        # block_size = Context Window (Max Sequence Length)
+        self.block_size = block_size 
+        
+        # 1. TOKEN EMBEDDINGS (wte = Word Token Embeddings)
+        #    Since this class if for Inference-only, 
+        #    overwrite these with OpenAI's pre-trained weights later.
+        self.wte = np.random.normal(scale=0.02, size=(vocab_size, d_model))
+        
+        # 2. POSITION EMBEDDINGS (wpe = Word Position Embeddings)
+        # - Learned positions instead of using sine/cosine waves (unlike original 2017 paper).
+        # - A unique vector learned for every single slot in the context window.
+        # Also overwrite these with OpenAI's pre-trained weights later.
+        self.wpe = np.random.normal(scale=0.02, size=(block_size, d_model))
+        
+        # 3. STACKED BLOCKS 
+        self.blocks = [TransformerBlockNumPy(d_model, n_head) for _ in range(n_layer)]
+        
+        # 4. FINAL LAYERNORM
+        self.ln_f = LayerNormNumPy(d_model)
+        
+        # 5. LANGUAGE MODEL HEAD 
+        # - Compare final embedding against every single
+        # - column in the library to see which one it matches best.
+        self.lm_head = np.random.normal(scale=0.02, size=(d_model, vocab_size))
+
+    def forward(self, idx):
+        # idx: [Batch, Time] (Integer indices provided by the Tokenizer)
+        batch, time = idx.shape
+        
+        # 1. Word Meaning
+        tok_emb = self.wte[idx] # Shape: [Batch, Time, 768]
+        
+        # 2. Position Meaning
+        pos_emb = self.wpe[np.arange(time)] # Shape: [Time, 768]
+        
+        # 3. Position-Aware Embeddings
+        # (Token Embeddings + Position Embeddings)
+        x = tok_emb + pos_emb
+        
+        # TRANSFORMER BLOCKS (The Thinking)
+        for block in self.blocks:
+            x = block.forward(x)
+            
+        # FINAL PREDICTION (The Dot Product)
+        # 1. First Cleanup
+        x = self.ln_f.forward(x)
+        
+        # 2. Calculate Logits (Alignment Scores)
+        logits = x @ self.lm_head
+        
+        return logits
+    
+
+
+def load_encoder_weights(gpt_numpy_model, model_type):
+    pass
+
+def generate(model, idx, max_new_tokens, temperature=1.0):
+    pass
+
+def main():
+    pass
