@@ -1,4 +1,6 @@
 import numpy as np
+import tiktoken  
+from transformers import GPT2LMHeadModel
 
 class CausalSelfAttentionNumPy:
     def __init__(self, d_model=512, n_head=8, max_len=512):
@@ -247,11 +249,138 @@ class GPT_Inference:
     
 
 
-def load_encoder_weights(gpt_numpy_model, model_type):
-    pass
+def load_encoder_weights(gpt_numpy_model, model_type='gpt2'):
+    """
+    Downloads the official pre-trained weights from OpenAI (via HuggingFace)
+    and maps them into our manual NumPy class structure.
+    """
+    
+    # 1. Downloads about ~500MB of data (for GPT-2 Small).
+    #    'hf_model' is a PyTorch object containing all the learned numbers.
+    hf_model = GPT2LMHeadModel.from_pretrained(model_type)
+    
+    sd = hf_model.state_dict()
+    
+    print("Injecting weights into NumPy model...")
+    
+    # HELPERs for PyTorch -> NumPy
+    def get_w(key): 
+        return sd[key].detach().numpy().T 
+    def get_b(key): 
+        return sd[key].detach().numpy()
+
+    # WTE (Word Token Embeddings)
+    gpt_numpy_model.wte = sd['transformer.wte.weight'].detach().numpy()
+    
+    # WPE (Word Position Embeddings)
+    gpt_numpy_model.wpe = sd['transformer.wpe.weight'].detach().numpy()
+    
+    for i, block in enumerate(gpt_numpy_model.blocks):
+
+        prefix = f'transformer.h.{i}'        
+
+        # --- Layer Norms ---
+        block.ln1.gamma = get_b(f'{prefix}.ln_1.weight')
+        block.ln1.beta  = get_b(f'{prefix}.ln_1.bias')
+        block.ln2.gamma = get_b(f'{prefix}.ln_2.weight')
+        block.ln2.beta  = get_b(f'{prefix}.ln_2.bias')
+        
+        # --- Attention ---
+        block.attn.c_attn.w = sd[f'{prefix}.attn.c_attn.weight'].detach().numpy()
+        block.attn.c_attn.b = get_b(f'{prefix}.attn.c_attn.bias')
+        
+        # Output Projection (c_proj): Mixing the head results back together
+        block.attn.c_proj.w = sd[f'{prefix}.attn.c_proj.weight'].detach().numpy()
+        block.attn.c_proj.b = get_b(f'{prefix}.attn.c_proj.bias')
+        
+        # --- MLP (Feed Forward) ---
+        block.mlp.c_fc.w = sd[f'{prefix}.mlp.c_fc.weight'].detach().numpy()
+        block.mlp.c_fc.b = get_b(f'{prefix}.mlp.c_fc.bias')
+        
+        block.mlp.c_proj.w = sd[f'{prefix}.mlp.c_proj.weight'].detach().numpy()
+        block.mlp.c_proj.b = get_b(f'{prefix}.mlp.c_proj.bias')
+
+    # Final Layer Norm weights
+    gpt_numpy_model.ln_f.gamma = get_b('transformer.ln_f.weight')
+    gpt_numpy_model.ln_f.beta  = get_b('transformer.ln_f.bias')
+    
+    # LM Head (The Vocabulary Projection)
+    gpt_numpy_model.lm_head    = get_w('lm_head.weight')
+
+    return gpt_numpy_model
+
+
+# =============================================================================
+# 3. THE DRIVER (The Functions you asked for)
+# =============================================================================
+def softmax(x):
+    exp_x = np.exp(x - np.max(x, axis=-1, keepdims=True))
+    return exp_x / np.sum(exp_x, axis=-1, keepdims=True)
+
 
 def generate(model, idx, max_new_tokens, temperature=1.0):
-    pass
+    # idx: [Batch, Time] array of integer indices
+    # This loop runs 'max_new_tokens' times. Each iteration generates ONE new word.    
+    
+    for _ in range(max_new_tokens):
+        # 1. Crop Context
+        idx_cond = idx[:, -model.block_size:]
+        
+        # 2. Forward Pass
+        logits = model.forward(idx_cond)
+        
+        # 3. Focus on the LAST word
+        last_time_step_logits = logits[:, -1, :] # Shape: [Batch, VocabSize]
+        
+        # 4. Apply Temperature
+        scaled_logits = last_time_step_logits / temperature
+        
+        # 5. Apply Softmax
+        # Turn raw scores (logits) into Probabilities (percentages).
+        probs = softmax(scaled_logits)
+        
+        idx_next = []
+        for i in range(idx.shape[0]):
+            # i = The current sentence index in the batch
+            # probs[i] = The probability list for THIS specific sentence
+            next_token = np.random.choice(len(probs[i]), 
+                                          p=probs[i])
+            idx_next.append(next_token)
+            
+        # 7. Update Sequence
+        idx_next = np.array(idx_next).reshape(-1, 1)
+        idx = np.concatenate((idx, idx_next), axis=1)
+        
+    return idx
 
-def main():
-    pass
+# =============================================================================
+# 4. MAIN EXECUTION
+# =============================================================================
+if __name__ == "__main__":
+    
+    # 1. Tokenizer (The Dictionary)
+    enc = tiktoken.get_encoding("gpt2")
+    
+    # 2. Setup Model (The Engine)
+    # Create the empty structure (random noise)
+    model = GPT_Inference()
+    # Download and inject the learned weights (OpenAI weights)
+    model = load_encoder_weights(model)
+    
+    # 3. Encode Input
+    input_text = "The scientist discovered"
+    input_ids = enc.encode(input_text)
+    
+    # Add Batch Dimension
+    # The model expects [Batch, Time].
+    # We have [Time]. So we wrap it in an extra list: [[Time]]
+    idx = np.array([input_ids]) 
+    
+    # 4. Generate
+    output_ids = generate(model, idx, max_new_tokens=20)
+    
+    # 5. Decode Output using Tokenizer
+    output_text = enc.decode(output_ids[0].tolist())
+    
+    print(f"\nInput:  {input_text}")
+    print(f"Output: {output_text}")
