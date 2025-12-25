@@ -65,6 +65,30 @@ class CausalSelfAttentionPyTorch(nn.Module):
 
 class MLPPyTorch(nn.Module):
     
-    # TODO    
     def __init__(self, d_model=512):
-        pass
+        super().__init__()
+        self.d_model = d_model
+        self.d_ff = 4 * d_model
+
+        # 1. First Linear Layer
+        # Shape: [d_model, 4*d_model]
+        self.c_fc = nn.Linear(d_model, self.d_ff)
+
+        # 2. Second Linear Layer
+        # Shape: [4*d_model, d_model]
+        self.c_proj = nn.Linear(self.d_ff, d_model)
+
+    def forward(self, x):
+        # x shape: [Batch, Time, d_model]
+
+        # 1. Expand (Linear)
+        x = self.c_fc(x)
+
+        # 2. Activate (GELU)
+        x = F.gelu(x, approximate='tanh')
+
+        # 3. Project (Linear)
+        x = self.c_proj(x)
+        return x
+
+    
