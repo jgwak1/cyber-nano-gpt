@@ -126,3 +126,70 @@ class TransformerBlockPyTorch(nn.Module):
         x = self.ln2(x)
 
         return x
+
+
+
+class GPT_Inference(nn.Module):
+    
+    def __init__(self, vocab_size=50257, 
+                       d_model=768, 
+                       n_layer=12, 
+                       n_head=12, 
+                       block_size=1024):
+        
+        super().__init__()
+
+        # block_size = Context Window (Max Sequence Length)
+        self.block_size = block_size
+
+        # 1. TOKEN EMBEDDINGS (wte = Word Token Embeddings)
+        #    Since this class if for Inference-only, 
+        #    overwrite these with OpenAI's pre-trained weights later.
+        self.wte = nn.Embedding(vocab_size, d_model)
+
+        # 2. POSITION EMBEDDINGS (wpe = Word Position Embeddings)
+        # - Learned positions instead of using sine/cosine waves (unlike original 2017 paper).
+        # - A unique vector learned for every single slot in the context window.
+        # Also overwrite these with OpenAI's pre-trained weights later.
+        self.wpe = nn.Embedding(block_size, d_model)
+
+        # 3. STACKED BLOCKS 
+        self.blocks = nn.ModuleList(
+            [TransformerBlockPyTorch(d_model, n_head) for _ in range(n_layer)]
+        )
+
+        # 4. FINAL LAYERNORM
+        self.ln_f = nn.LayerNorm(d_model)
+
+        # 5. LANGUAGE MODEL HEAD 
+        # - Compare final embedding against every single column in the library to see which one it matches best.
+        self.lm_head = nn.Linear(d_model, vocab_size, bias=False)
+
+    def forward(self, idx):
+        # idx: [Batch, Time] (Integer indices provided by the Tokenizer)
+        device = idx.device
+        b, t = idx.size()
+
+        # 1. Word Meaning
+        tok_emb = self.wte(idx) # [Batch, Time, d_model]
+
+        # 2. Position Embeddings
+        pos = torch.arange(0, t, dtype=torch.long, device=device)
+        pos_emb = self.wpe(pos) # [Time, d_model]
+
+        # 3. Position-Aware Embeddings
+        # (Token Embeddings + Position Embeddings)
+        x = tok_emb + pos_emb
+
+        # TRANSFORMER BLOCKS (The Thinking)
+        for block in self.blocks:
+            x = block(x)
+
+        # FINAL PREDICTION (The Dot Product)
+        # 1. Final Norm (First Cleanup)
+        x = self.ln_f(x)
+
+        # 2. Calculate Logits (Alignment Scores)
+        logits = self.lm_head(x)
+
+        return logits
