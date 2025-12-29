@@ -2,6 +2,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+import tiktoken
+from transformers import GPT2LMHeadModel
+
 class CausalSelfAttentionPyTorch(nn.Module):
     
     def __init__(self, d_model=512, n_head=8, max_len=512):
@@ -193,3 +196,63 @@ class GPT_Inference(nn.Module):
         logits = self.lm_head(x)
 
         return logits
+
+
+def load_pretrained_weights(my_model, model_type='gpt2'):
+    """
+    Downloads official OpenAI weights and maps them to our PyTorch model.
+    """
+  
+    print("Loading weights from HuggingFace...")
+    hf_model = GPT2LMHeadModel.from_pretrained(model_type)
+    sd = hf_model.state_dict()
+
+    with torch.no_grad():    # just initializing memory here, not training.
+
+        # 1. Embeddings
+        my_model.wte.weight.copy_(sd['transformer.wte.weight'])
+        my_model.wpe.weight.copy_(sd['transformer.wpe.weight'])
+
+        # 2. Blocks
+        for i, block in enumerate(my_model.blocks):
+            prefix = f'transformer.h.{i}'
+
+            # Layer Norms
+            block.ln1.weight.copy_(sd[f'{prefix}.ln_1.weight'])
+            block.ln1.bias.copy_(sd[f'{prefix}.ln_1.bias'])
+            block.ln2.weight.copy_(sd[f'{prefix}.ln_2.weight'])
+            block.ln2.bias.copy_(sd[f'{prefix}.ln_2.bias'])
+
+            # Attention
+            #    
+            # PyTorch nn.Linear weights are [Out, In].
+            # HF GPT2 Conv1D weights are [In, Out].
+            # So we must TRANSPOSE (.t()) weights when copying from HF to our nn.Linear.
+            
+            # c_attn weight; transposed
+            block.attn.c_attn.weight.copy_(sd[f'{prefix}.attn.c_attn.weight'].t())
+            block.attn.c_attn.bias.copy_(sd[f'{prefix}.attn.c_attn.bias'])
+            
+            # c_proj weight; transposed
+            block.attn.c_proj.weight.copy_(sd[f'{prefix}.attn.c_proj.weight'].t())
+            block.attn.c_proj.bias.copy_(sd[f'{prefix}.attn.c_proj.bias'])
+
+            # MLP
+            # c_fc weight; transposed
+            block.mlp.c_fc.weight.copy_(sd[f'{prefix}.mlp.c_fc.weight'].t())
+            block.mlp.c_fc.bias.copy_(sd[f'{prefix}.mlp.c_fc.bias'])
+
+            # c_proj weight; transposed
+            block.mlp.c_proj.weight.copy_(sd[f'{prefix}.mlp.c_proj.weight'].t())
+            block.mlp.c_proj.bias.copy_(sd[f'{prefix}.mlp.c_proj.bias'])
+
+        # 3. Final Norm
+        my_model.ln_f.weight.copy_(sd['transformer.ln_f.weight'])
+        my_model.ln_f.bias.copy_(sd['transformer.ln_f.bias'])
+
+        # 4. LM Head
+        # Note: HF often ties weights (wte.weight == lm_head.weight).
+        # Explicitly copy them here to be safe.
+        my_model.lm_head.weight.copy_(sd['lm_head.weight'])
+
+    return my_model
