@@ -249,7 +249,7 @@ class GPT_Inference:
     
 
 
-def load_encoder_weights(gpt_numpy_model, model_type='gpt2'):
+def load_pretrained_weights(gpt_numpy_model, model_type='gpt2'):
     """
     Downloads the official pre-trained weights from OpenAI (via HuggingFace)
     and maps them into our manual NumPy class structure.
@@ -365,7 +365,7 @@ if __name__ == "__main__":
     # Create the empty structure (random noise)
     model = GPT_Inference()
     # Download and inject the learned weights (OpenAI weights)
-    model = load_encoder_weights(model)
+    model = load_pretrained_weights(model)
     
     # 3. Encode Input
     input_text = "The scientist discovered"
