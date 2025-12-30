@@ -256,3 +256,36 @@ def load_pretrained_weights(my_model, model_type='gpt2'):
         my_model.lm_head.weight.copy_(sd['lm_head.weight'])
 
     return my_model
+
+
+def autoregressive_decoding(model, idx, max_new_tokens, temperature=1.0):
+    # idx: [Batch, Time] array of integer indices
+    # This loop runs 'max_new_tokens' times. Each iteration generates ONE new word.
+    
+    model.eval() # Set to evaluation mode
+    with torch.no_grad():
+
+        for _ in range(max_new_tokens):
+            # 1. Crop Context
+            idx_cond = idx[:, -model.block_size:]
+
+            # 2. Forward Pass
+            logits = model(idx_cond)
+
+            # 3. Focus on the LAST word
+            last_logits = logits[:, -1, :] # [Batch, Vocab]
+
+            # 4. Apply Temperature
+            scaled_logits = last_logits / temperature
+
+            # 5. Softmax -> Probabilities
+            probs = F.softmax(scaled_logits, dim=-1)
+
+            # 6. Sample (The Choice)
+            # torch.multinomial handles the sampling logic efficiently
+            idx_next = torch.multinomial(probs, num_samples=1) # [Batch, 1]
+
+            # 7. Update Sequence
+            idx = torch.cat((idx, idx_next), dim=1)
+
+    return idx
