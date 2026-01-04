@@ -21,4 +21,15 @@ class CausalSelfAttentionTF(layers.Layer):
 
         # 3. CAUSAL MASK
         mask = 1 - tf.linalg.band_part(tf.ones((max_len, max_len)), -1, 0)
-        self.bias = tf.reshape(mask, (1, 1, max_len, max_len)) # for broatcasting 
+        self.bias = tf.reshape(mask, (1, 1, max_len, max_len)) # for broadcasting
+
+
+    def split_heads(self, x, batch_size):
+        # Input 'x' shape is (Batch, Seq_Len, d_model)
+
+        # Reshape to (Batch, Seq, Heads, Head_Dim)
+        x = tf.reshape(x, (batch_size, -1, self.n_head, self.head_dim))
+        
+        # Transpose to (Batch, Heads, Seq, Head_Dim)
+        return tf.transpose(x, perm=[0, 2, 1, 3])
+
