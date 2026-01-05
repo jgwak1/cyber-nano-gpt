@@ -33,3 +33,61 @@ class CausalSelfAttentionTF(layers.Layer):
         # Transpose to (Batch, Heads, Seq, Head_Dim)
         return tf.transpose(x, perm=[0, 2, 1, 3])
 
+
+
+    def call(self, x):
+        # x shape: (Batch, Seq_Len, d_model)
+        # Seq_Len can be 4, 10, or 1024 (dynamic)
+
+        batch_size = tf.shape(x)[0]
+        seq_len = tf.shape(x)[1]
+
+        # 1. CALCULATE Q, K, V
+        # ---------------------------------------------------------
+        # Run Linear Layer -> (Batch, Seq, 3 * d_model)
+        qkv = self.c_attn(x)
+        
+        # Split into 3 tensors: Q, K, V
+        # Each is (Batch, Seq, d_model)
+        q, k, v = tf.split(qkv, num_or_size_splits=3, axis=-1) 
+
+        # 2. SPLIT HEADS
+        # ---------------------------------------------------------
+        # Transform (Batch, Seq, d_model) -> (Batch, Heads, Seq, Head_Dim)
+        q = self.split_heads(q, batch_size)
+        k = self.split_heads(k, batch_size)
+        v = self.split_heads(v, batch_size)
+
+        # 3. ATTENTION SCORES (The Dot Product)
+        # ---------------------------------------------------------
+        # Equation: Q @ K_Transpose
+        # Shapes: (Batch, Head, Seq, Head_Dim) @ (Batch, Head, Head_Dim, Seq) -> (Batch, Head, Seq, Seq) 
+        att = tf.matmul(q, k, transpose_b=True) * self.scale
+
+        # 4. CAUSAL MASKING
+        # ---------------------------------------------------------
+        current_mask = self.bias[:, :, :seq_len, :seq_len]
+        # Add -1e9 to future positions so Softmax crushes them to zero.
+        att += (current_mask * -1e9)
+
+        # 5. SOFTMAX & AGGREGATE
+        # ---------------------------------------------------------
+        # Normalize rows to sum to 1.0
+        att = tf.nn.softmax(att, axis=-1)
+
+        # Weighted Sum of Values
+        # (Batch, Head, Seq, Seq) @ (Batch, Head, Seq, Head_Dim) -> (B, h, Seq, Head_Dim)
+        y = tf.matmul(att, v)
+
+        # 6. REASSEMBLE
+        # ---------------------------------------------------------
+        # Transpose back: (Batch, Head, Seq, Head_Dim) -> (Batch, Seq, Head, Head_Dim)
+        # We move the 'Heads' dimension next to 'Head_Size' so we can merge them.
+        y = tf.transpose(y, perm=[0, 2, 1, 3])
+        
+        # Reshape: (Batch, Seq, Head * Head_Dim) -> (Batch, Seq, d_model)
+        y = tf.reshape(y, (batch_size, seq_len, self.d_model))
+
+        # 7. OUTPUT PROJECTION
+        # Mixes insights from different heads together.
+        return self.c_proj(y)
