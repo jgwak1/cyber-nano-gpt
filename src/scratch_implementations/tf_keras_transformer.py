@@ -91,3 +91,33 @@ class CausalSelfAttentionTF(layers.Layer):
         # 7. OUTPUT PROJECTION
         # Mixes insights from different heads together.
         return self.c_proj(y)
+
+
+class MLPTF(layers.Layer):
+    def __init__(self, d_model=768, **kwargs):
+        super().__init__(**kwargs)
+        
+        self.d_ff = 4 * d_model
+        
+        # 1. Expand (Up-Project)
+        # Projects from Small (768) -> Big (3072)
+        self.c_fc = layers.Dense(self.d_ff, name="c_fc")
+        
+        # 2. Contract (Down-Project)
+        # Projects from Big (3072) -> Small (768)
+        self.c_proj = layers.Dense(d_model, name="c_proj")
+
+    def call(self, x):
+        
+        # LINEAR EXPANSION (Up-Project)
+        # x shape: (Batch, Seq, d_model) -> (Batch, Seq, d_model*4)
+        x = self.c_fc(x)
+        
+        # NON-LINEARITY
+        x = tf.nn.gelu(x, approximate=True)
+        
+        # LINEAR CONTRACTION (Down-Project)
+        # x shape: (Batch, Seq, d_model*4) -> (Batch, Seq, d_model) 
+        x = self.c_proj(x)
+        
+        return x
