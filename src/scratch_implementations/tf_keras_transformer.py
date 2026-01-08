@@ -121,3 +121,30 @@ class MLPTF(layers.Layer):
         x = self.c_proj(x)
         
         return x
+
+
+class TransformerBlockTF(layers.Layer):
+ 
+    def __init__(self, d_model=768, n_head=12, **kwargs):
+        super().__init__(**kwargs)
+        self.attn = CausalSelfAttentionTF(d_model, n_head)
+        self.mlp = MLPTF(d_model)
+
+        self.ln1 = layers.LayerNormalization(epsilon=1e-5, name="ln_1")
+        self.ln2 = layers.LayerNormalization(epsilon=1e-5, name="ln_2")
+
+    def call(self, x):
+
+        # 1. Attention (PRE-NORM instead of POST-NORM; to preserve the gradient highway through the skip connection)
+        input_copy = x              
+        x_norm = self.ln1(x)         
+        attn_out = self.attn(x_norm) 
+        x = input_copy + attn_out    
+
+        # 2. MLP (PRE-NORM instead of POST-NORM)
+        input_copy = x              
+        x_norm = self.ln2(x)         
+        mlp_out = self.mlp(x_norm)   
+        x = input_copy + mlp_out    
+        
+        return x
