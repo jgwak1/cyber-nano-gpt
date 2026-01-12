@@ -1,5 +1,5 @@
 import tensorflow as tf
-from tensorflow.keras import layers
+from tensorflow.keras import layers, Model
 import numpy as np
 
 class CausalSelfAttentionTF(layers.Layer):
@@ -148,3 +148,82 @@ class TransformerBlockTF(layers.Layer):
         x = input_copy + mlp_out    
         
         return x
+    
+
+class GPT_Inference_TF(Model):
+    def __init__(self, vocab_size=50257, d_model=768, n_layer=12, n_head=12, max_len=1024):
+        super().__init__()
+        
+        self.d_model = d_model
+
+        # block_size = Context Window (Max Sequence Length)
+        self.block_size = max_len
+
+        # 1. TOKEN EMBEDDINGS (wte = Word Token Embeddings)
+        #    Since this class if for Inference-only, 
+        #    overwrite these with OpenAI's pre-trained weights later.
+        self.wte = layers.Embedding(vocab_size, d_model, name="wte")
+
+        # 2. POSITION EMBEDDINGS (wpe = Word Position Embeddings)
+        # - Learned positions instead of using sine/cosine waves (unlike original 2017 paper).
+        # - A unique vector learned for every single slot in the context window.
+        # Also overwrite these with OpenAI's pre-trained weights later.
+        self.wpe = layers.Embedding(max_len, d_model, name="wpe")
+
+        # 3. STACKED BLOCKS 
+        self.blocks_list = [
+            TransformerBlockTF(d_model, n_head, name=f"h_{i}") 
+            for i in range(n_layer)
+        ]
+
+        # 4. FINAL LAYERNORM
+        self.ln_f = layers.LayerNormalization(epsilon=1e-5, name="ln_f")
+        
+        # 5. LANGUAGE MODEL HEAD 
+        # - In most classic Transformers, "self.lm_head.weight = self.wte.weight" for "Semantic Consistency" and "Parameter Efficiency" 
+        # - Compare final embedding against every single column in the library to see which one it matches best.
+        self.lm_head = layers.Dense(vocab_size, use_bias=False, name="lm_head")
+
+    def call(self, idx):
+        # idx: [Batch, Time] (Integer indices provided by the Tokenizer)
+
+        batch_size = tf.shape(idx)[0]
+        t = tf.shape(idx)[1]
+        
+        # Word Embeddings
+        tok_emb = self.wte(idx)
+
+        # Position Embeddings
+        pos = tf.range(0, t, dtype=tf.int32) # POSITION INDICES
+        pos_emb = self.wpe(pos)
+        
+        # Position-Aware Word Embeddings
+        # (Token Embeddings + Position Embeddings)
+        x = tok_emb + pos_emb
+        
+        # TRANSFORMER BLOCKS (The Thinking)
+        for block in self.blocks_list:
+            x = block(x)
+            
+        # FINAL PREDICTION (The Dot Product) 
+        # 1. Final Norm (First Cleanup)
+        x = self.ln_f(x)
+        
+        # 2. Calculate Logits (Alignment Scores)
+        #     x: (B, T, 768)
+        #     lm_head: (768, 50257)
+        #     Result: (B, T, 50257)
+        #     
+        #     we compare our contextualized thought vectors against the 
+        #     static dictionary definitions to get raw scores (logits).
+        logits = self.lm_head(x)
+        
+        return logits
+
+
+
+
+
+
+
+
