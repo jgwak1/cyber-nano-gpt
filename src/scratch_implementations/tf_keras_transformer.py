@@ -1,5 +1,6 @@
 import tensorflow as tf
 from tensorflow.keras import layers, Model
+from transformers import TFGPT2LMHeadModel
 import numpy as np
 
 class CausalSelfAttentionTF(layers.Layer):
@@ -221,6 +222,77 @@ class GPT_Inference_TF(Model):
         return logits
 
 
+def load_pretrained_weights_tf(my_model, model_type='gpt2'):
+    """
+    Downloads official OpenAI weights (via HuggingFace) and maps them to our TF model.
+    """
+    print(f"Loading weights from HuggingFace ({model_type})...")
+    
+    hf_model = TFGPT2LMHeadModel.from_pretrained(model_type)
+    
+    my_model.wte.set_weights(hf_model.transformer.wte.get_weights())
+    my_model.wpe.set_weights(hf_model.transformer.wpe.get_weights())
+
+    for i, block in enumerate(my_model.blocks_list):
+        hf_block = hf_model.transformer.h[i]
+
+        block.ln1.set_weights(hf_block.ln_1.get_weights())
+        block.ln2.set_weights(hf_block.ln_2.get_weights())
+
+        block.attn.c_attn.set_weights(hf_block.attn.c_attn.get_weights())
+        block.attn.c_proj.set_weights(hf_block.attn.c_proj.get_weights())
+
+        block.mlp.c_fc.set_weights(hf_block.mlp.c_fc.get_weights())
+        block.mlp.c_proj.set_weights(hf_block.mlp.c_proj.get_weights())
+
+    my_model.ln_f.set_weights(hf_model.transformer.ln_f.get_weights())
+
+    try:
+
+        if hasattr(hf_model, 'lm_head'):
+             my_model.lm_head.set_weights(hf_model.lm_head.get_weights())
+        else:
+             print("Loading tied weights from WTE to LM Head (Transposing)...")
+             wte_weights = hf_model.transformer.wte.get_weights()[0] # [Vocab, Dim]
+             my_model.lm_head.set_weights([wte_weights.T]) # [Dim, Vocab]
+             
+    except Exception as e:
+        print(f"Warning: Could not load LM Head weights directly: {e}")
+        print("Using WTE weights (Weight Tying) as fallback.")
+        wte_weights = my_model.wte.get_weights()[0] # [Vocab, Dim]
+        # Dense layer expects [Dim, Vocab], so we Transpose.
+        my_model.lm_head.set_weights([wte_weights.T])
+
+    print("Weights loaded successfully!")
+    return my_model
+
+
+
+def autoregressive_decoding_tf(model, idx, max_new_tokens, temperature=1.0):
+    # idx: [Batch, Time] array of integer indices
+    # This loop runs 'max_new_tokens' times. Each iteration generates ONE new word.
+
+    for _ in range(max_new_tokens):
+        
+        # 1. Crop Context (Sliding Window)
+        idx_cond = idx[:, -model.block_size:]
+        
+        # 2. Forward Pass
+        logits = model(idx_cond)
+        
+        # 3. Focus on the LAST token
+        last_logits = logits[:, -1, :]
+        
+        # 4. Scale by Temperature
+        scaled_logits = last_logits / temperature
+        
+        # 5. Sample (Internal-Softmax -> Probabilities -> Sampling)
+        idx_next = tf.random.categorical(scaled_logits, num_samples=1, dtype=tf.int32)
+        
+        # 6. Update Sequence
+        idx = tf.concat([idx, idx_next], axis=1)
+        
+    return idx
 
 
 
