@@ -1,5 +1,5 @@
 import tensorflow as tf
-from tensorflow.keras import layers, Model
+from tensorflow.keras import layers, Model, optimizers, losses
 from transformers import TFGPT2LMHeadModel
 import numpy as np
 
@@ -294,6 +294,45 @@ def autoregressive_decoding_tf(model, idx, max_new_tokens, temperature=1.0):
         
     return idx
 
+@tf.function # compiles function into static C++ graph for faster execution
+def train_step(model, inputs, targets, optimizer):
+    """
+    Performs one step of Backpropagation (Training).
+    """
+
+    with tf.GradientTape() as tape:
+        
+        logits = model(inputs, training=True) 
+
+        shift_logits = logits[:, :-1, :]
+        shift_labels = targets[:, 1:]
+
+        logits_flat = tf.reshape(shift_logits, (-1, tf.shape(shift_logits)[-1]))
+        labels_flat = tf.reshape(shift_labels, (-1,))
+
+        loss_fn = losses.SparseCategoricalCrossentropy(from_logits=True)
+        
+        loss = loss_fn(labels_flat, logits_flat)
+
+    grads = tape.gradient(loss, model.trainable_variables)
+    
+    optimizer.apply_gradients(zip(grads, model.trainable_variables))
+
+    return loss
+
+def train_model(model, train_data, epochs=3):
+    """
+    Runs the training loop for a set number of epochs.
+    """
+    print("\n=== STARTING TRAINING ===")
+    optimizer = optimizers.AdamW(learning_rate=3e-4)
+
+    for epoch in range(epochs):
+        loss_val = train_step(model, train_data, train_data, optimizer)
+        print(f"Epoch {epoch+1}/{epochs} | Loss: {float(loss_val):.4f}")
+        
+    print("=== TRAINING COMPLETE ===\n")
+    return model
 
 
 
