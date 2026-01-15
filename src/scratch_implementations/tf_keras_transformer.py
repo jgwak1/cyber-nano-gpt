@@ -1,6 +1,7 @@
 import tensorflow as tf
 from tensorflow.keras import layers, Model, optimizers, losses
 from transformers import TFGPT2LMHeadModel
+import tiktoken  # OpenAI's tokenizer library
 import numpy as np
 
 class CausalSelfAttentionTF(layers.Layer):
@@ -334,6 +335,61 @@ def train_model(model, train_data, epochs=3):
     print("=== TRAINING COMPLETE ===\n")
     return model
 
+
+if __name__ == "__main__":
+    
+    # 1. SETUP
+    # ---------------------------------------------------------
+    enc = tiktoken.get_encoding("gpt2")
+    gpt2_vocab_size = enc.n_vocab  # Vocabulary Size of GPT-2
+    print(f"Detected Vocab Size: {gpt2_vocab_size}")
+    
+    print("Physical Devices:", tf.config.list_physical_devices('GPU'))
+
+    # Initialize Model
+    model = GPT_Inference_TF(vocab_size=gpt2_vocab_size)
+    _ = model(tf.zeros((1, 1), dtype=tf.int32)) # Feed dummy input to initialize Keras layers (due to lazy execution); required in case we load weights
+
+    # 2. CONFIGURATION
+    # ---------------------------------------------------------
+    USE_PRETRAINED_WEIGHTS = True 
+
+    if USE_PRETRAINED_WEIGHTS:
+        model = load_pretrained_weights_tf(model)
+        print("Loaded OpenAI GPT-2 weights.")
+    else:
+        print("Initialized with random weights (Training from scratch).")
+
+
+    # 3. PREPARE DATA ( Fake Dataset: 10 sentences, 64 tokens each )
+    #    Shape: (10, 64) -> [Batch Size, Sequence Length]
+    # ----------------------------------------------------------------
+    train_data = tf.random.uniform(
+        shape=(10, 64), 
+        minval=0, 
+        maxval=gpt2_vocab_size, 
+        dtype=tf.int32
+    )
+
+    # 4. TRAINING
+    # ----------------------------------------------------------------
+    model = train_model(model, train_data, epochs=5)
+
+
+    # 5. INFERENCE
+    # ----------------------------------------------------------------
+    print("\n--- INFERENCE PHASE ---")
+
+    input_text = "The scientist discovered"
+    input_ids = enc.encode(input_text)
+    idx = tf.constant([input_ids], dtype=tf.int32)
+
+    output_ids = autoregressive_decoding_tf(model, idx, max_new_tokens=20)
+
+    output_text = enc.decode(output_ids.numpy()[0].tolist())
+
+    print(f"Input:  {input_text}")
+    print(f"Output: {output_text}")
 
 
 
