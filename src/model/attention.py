@@ -4,7 +4,7 @@ import torch.nn.functional as F
 
 class CausalSelfAttentionPyTorch(nn.Module):
     
-    def __init__(self, d_model=512, n_head=8, max_len=512):
+    def __init__(self, d_model=512, n_head=8, max_len=512, dropout=0.1):
         super().__init__()
         self.d_model = d_model
         self.n_head = n_head
@@ -16,6 +16,16 @@ class CausalSelfAttentionPyTorch(nn.Module):
 
         # 2. Output Projection Weights
         self.c_proj = nn.Linear(d_model, d_model)
+
+        # 3. Dropout Layers
+        
+        # attn_dropout: Drops connections in the "attention(i.e., who looks at whom)" matrix.
+        #               i.e., Randomly "blinds" tokens from seeing specific past tokens. Prevents the model from memorizing simple patterns like "Token A always follows Token B."
+        self.attn_dropout = nn.Dropout(dropout)
+
+        # resid_dropout: Drops the final output features before adding to the residual.
+        #                i.e., Randomly drops information before it enters the main residual highway. This forces the network to distribute information across many neurons rather than relying on a single "super neuron."
+        self.resid_dropout = nn.Dropout(dropout)
 
     def forward(self, x):
         # x shape: [Batch, Time, Channel] (B, T, C)
@@ -50,15 +60,26 @@ class CausalSelfAttentionPyTorch(nn.Module):
         
         att = F.softmax(att, dim=-1)
 
-        # 6. AGGREGATE for Attention Outputs
+        # 6. Apply Attention Dropout
+        # Drop values right after softmax ( Randomly zeroes out attention scores (i.e., edges in the graph).)
+        # This prevents the model from being "too sure" about which previous word matters.
+        # (e.g., Prevents the model from just looking at "France" to predict "Paris", forcing it to also attend to "capital" and "The".)
+        att = self.attn_dropout(att)
+
+        # 7. AGGREGATE for Attention Outputs
         # (B, h, T, T) @ (B, h, T, hs) -> (B, h, T, hs)
         y = att @ v
 
-        # 7. REASSEMBLE HEADS
+        # 8. REASSEMBLE HEADS
         # Permute: [B, h, T, hs] -> [B, T, h, hs]
         # Reshape: [B, T, h, hs] -> [B, T, C] (where C = n_head * head_dim)
         y = y.permute(0, 2, 1, 3).contiguous().view(B, T, C)
 
-        # 8. OUTPUT PROJECTION
+        # 9. OUTPUT PROJECTION
         # [B, T, C] @ [C, C] -> [B, T, C]
-        return self.c_proj(y)
+        y = self.c_proj(y)
+      
+        # 10. Drops the final output features before adding to the residual
+        y = self.resid_dropout(y)
+
+        return y

@@ -6,10 +6,11 @@ from .layers import TransformerBlockPyTorch
 class GPT(nn.Module):
     
    def __init__(self, vocab_size=50257, 
-                       d_model=768, 
-                       n_layer=12, 
-                       n_head=12, 
-                       block_size=1024):
+                      d_model=768, 
+                      n_layer=12, 
+                      n_head=12, 
+                      block_size=1024,
+                      dropout=0.1):
         
         super().__init__()
 
@@ -27,17 +28,52 @@ class GPT(nn.Module):
         # Also overwrite these with OpenAI's pre-trained weights later.
         self.wpe = nn.Embedding(block_size, d_model)
 
-        # 3. STACKED BLOCKS 
+        # 3. EMBEDDING DROPOUT
+        # Randomly mask out some input tokens completely.
+        self.drop = nn.Dropout(dropout)
+
+
+        # 4. STACKED BLOCKS 
         self.blocks = nn.ModuleList(
-            [TransformerBlockPyTorch(d_model, n_head) for _ in range(n_layer)]
+            [TransformerBlockPyTorch(d_model, n_head, dropout=dropout) for _ in range(n_layer)]
         )
 
-        # 4. FINAL LAYERNORM
+        # 5. FINAL LAYERNORM
         self.ln_f = nn.LayerNorm(d_model)
 
-        # 5. LANGUAGE MODEL HEAD 
+        # 6. LANGUAGE MODEL HEAD 
         # - Compare final embedding against every single column in the library to see which one it matches best.
         self.lm_head = nn.Linear(d_model, vocab_size, bias=False)
+
+        # 7. WEIGHT TYING
+        # - Point the output head to the same memory as the input embeddings, which saves parameters and typically improves performance.
+        self.lm_head.weight = self.wte.weight
+
+        # 8. WEIGHT INITIALIZATION
+        # Apply special GPT-2 initialization logic to all sub-modules.
+        self.apply(self._init_weights)
+
+        # 9. RESIDUAL SCALING
+        # Scale weights of c_proj layers by 1/sqrt(2 * n_layers) to prevent variance explosion in deep residual streams.
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02 / (2 * n_layer)**0.5)
+
+
+   def _init_weights(self, module):
+        """
+        Standard GPT-2 initialization.
+        - Linear/Embedding weights: Normal dist (mean=0, std=0.02)
+        - Biases: 0
+        """
+        if isinstance(module, nn.Linear):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+
+        elif isinstance(module, nn.Embedding):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+
 
    def forward(self, idx):
         # idx: [Batch, Time] (Integer indices provided by the Tokenizer)
@@ -54,6 +90,13 @@ class GPT(nn.Module):
         # 3. Position-Aware Embeddings
         # (Token Embeddings + Position Embeddings)
         x = tok_emb + pos_emb
+
+        # 4. Dropout (Randomly zeroes out specific elements in the embedding vectors)
+        #    - Regularizes the input representation to prevent overfitting.
+        #      (e.g., If the feature representing "securityness" is zeroed out in the embedding of token "SSH", 
+        #       the model must rely on other features like "protocol-type" to identify it.)
+        x = self.drop(x)
+
 
         # TRANSFORMER BLOCKS (The Thinking)
         for block in self.blocks:
