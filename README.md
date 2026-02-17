@@ -51,7 +51,8 @@ Unlike classifiers that look for specific keywords, this model uses **Next-Token
 
 ### 3. MLOps Infrastructure
 * **Experiment Tracking:** MLflow (Loss curves).
-* **Data Versioning:** DVC (S3 Backend).
+* **Data Versioning:** DVC (S3 Backend) - Multi-stage versioning for raw vs. processed logs.
+* **Large-Scale ETL:** PySpark - Distributed extraction of textual payloads from BOTS v1 JSON (120GB raw).
 * **CI/CD:** GitHub Actions (Unit Tests & Container Builds).
 * **Serving:** FastAPI wrapped in Docker (AWS Lambda compatible).
 
