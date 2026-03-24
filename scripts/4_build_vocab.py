@@ -57,6 +57,8 @@ def main():
     # A generator-based, line-by-line read guarantees memory stability regardless of file size.
     
     total_seqs = 0
+    benign_seqs = 0  # Tracker for strictly normal traffic
+
     for file_path in csv_files:
         with open(file_path, 'r', encoding='utf-8') as f:
             reader = csv.reader(f)
@@ -65,8 +67,19 @@ def main():
             for row in reader:
                 if not row: continue
                 sequence = row[0]
+                label = row[1]                
+                
                 total_seqs += 1
                 
+                # Strict Isolation of Normal Behavior.
+                # Vocabulary MUST NOT contain artifacts unique to malicious traffic.
+                if label != "Benign":
+                    continue
+                    
+                benign_seqs += 1
+
+
+
                 # Tokenize by space delimiter
                 tokens = sequence.split(" ")
                 for token in tokens:
@@ -90,7 +103,7 @@ def main():
                         raw_observed_sets[prefix].add(value)
 
     print(f"    - Scanned {total_seqs} sequences across {len(csv_files)} partitions.")
-
+    print(f"    - Used for Vocab (Benign Only): {benign_seqs} sequences.")
     # =============================================================================
     # 4. VOCABULARY COMPILATION (Pre-emptive Bin Population)
     # =============================================================================
