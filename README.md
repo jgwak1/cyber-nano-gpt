@@ -1,78 +1,74 @@
-# Cyber-Nano-GPT (MLOps Edition)
+# Cyber-Nano-GPT
 
-An End-to-End MLOps pipeline for a custom Cyber-Security Foundation Model.
+A small GPT-style Transformer project for security telemetry modeling.
+
+## What it is
+
+Cyber-Nano-GPT is an ongoing project for building a compact GPT-style Transformer over structured security telemetry. The current focus is on converting network-flow records into token sequences, implementing core Transformer components in PyTorch, and using the resulting pipeline for controlled next-token modeling experiments.
 
 ## Project Goal
-To engineer a production-grade **Anomaly Detection Pipeline** capable of scaling from local training to cloud deployment. This project demonstrates the full **Machine Learning Lifecycle (MLOps)**: Data Versioning, CI/CD, Model Registry, and Serverless Serving.
 
-### The Objective: "The Probability Engine"
-The goal is NOT to build a chatbot. The goal is to build a **Conditional Probability Estimator** that calculates the likelihood of every token in a log stream.
-* **Low Loss:** Normal traffic (e.g., standard admin logins).
-* **High Loss:** Anomalous patterns (e.g., obfuscated PowerShell, SQL injection) that deviate from learned syntax.
+The near-term goal is to build a working next-token modeling baseline for security telemetry and evaluate whether token-level prediction signals can be useful for anomaly-oriented analysis.
 
----
+## Modeling Idea
 
-## Architecture: The "Guard & Detective" Pattern
+Instead of treating telemetry analysis as a fixed-label classification problem, this project explores next-token prediction over structured event sequences. The idea is to model what “normal continuation” looks like in telemetry and then inspect whether unusual token-level behavior can provide a useful signal for suspicious activity.
 
+## Implemented so far
 
-### 1. The Guard (Nano-GPT)
-* **Role:** Real-time Anomaly Detection (Sidecar).
-* **Function:** Assigns a "Perplexity Score" to live logs. High perplexity triggers The Detective.
+- Built a PySpark-based preprocessing pipeline for CIC-IDS2018 network-flow data.
+- Reduced the raw feature space from 80 fields to 19 curated fields for modeling.
+- Applied log-binning and converted each record into a fixed-order token sequence for GPT-style next-token modeling.
+- Implemented core GPT-style Transformer components in PyTorch, including causal self-attention, Transformer blocks, token embeddings, and positional embeddings.
+- Verified core architecture behavior through parameter-count and forward-pass checks.
+- Prepared the training data interface by building a benign-only vocabulary, adding fallback handling for unseen feature values, and creating an iterable dataset loader for fixed-length next-token modeling.
 
-### 2. The Detective (LangChain + RAG)
-* **Role:** Incident Investigation.
-* **Function:** Retrieves Threat Intel (MITRE ATT&CK) via RAG to explain *why* the Nano-GPT flagged the log.
+## Current technical direction
 
----
+The current repository centers on three pieces:
 
-## Core Logic: How It Detects Attacks
-Unlike classifiers that look for specific keywords, this model uses **Next-Token Prediction** to detect anomalies based on *mathematical surprise*.
+1. **Telemetry preprocessing**
+   - Transform raw network-flow records into compact, structured token sequences.
 
-**Scenario:** A Hacker attempts SQL Injection: `GET /login?user=' OR 1=1`
+2. **Custom Transformer implementation**
+   - Build and verify GPT-style components directly in PyTorch for controlled experiments.
 
-| Step | Context | Model Expectation | Actual Token | Loss (Surprise) | Interpretation |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| 1 | `GET /login?` | `id`, `user` | `user` | **0.01** (Low) | Normal |
-| 2 | `?user=` | `[string]` | `'` | **6.90** (High) | Quotes rare here |
-| 3 | `?user='` | ` ` (Space) | `OR` | **9.21** (Massive) | Unexpected SQL |
+3. **Baseline next-token modeling**
+   - Train and inspect sequence models before adding more ambitious downstream layers.
 
----
+## Current status
 
-## Technical Architecture
+The preprocessing pipeline, core model components, and training-data interface are implemented. The project is currently focused on running and refining end-to-end baseline training and evaluation.
 
-### 1. Core Implementation & Config
-* **First Principles:** Self-Attention implemented manually in **NumPy** (Linear Algebra verification) before PyTorch.
-* **Model:** 60M Parameters ("Nano"), 10 Layers, 8 Heads, 512 Embed Dim.
-* **Hardware:** Optimized for Consumer GPUs (RTX 4000 - 8GB VRAM) using FP16 Mixed Precision.
-
-### 2. Scalability & Distributed Training
-* **Cloud-Agnostic:** Containerized (Docker) for AWS/GCP execution.
-* **Distributed:** Training loop utilizes **Hugging Face Accelerate** and **DDP** (Distributed Data Parallel) to scale across multiple GPUs.
-
-### 3. MLOps Infrastructure
-* **Experiment Tracking:** MLflow (Loss curves).
-* **Data Versioning:** DVC (S3 Backend) - Multi-stage versioning for raw vs. processed logs.
-* **Large-Scale ETL:** PySpark - Distributed extraction of textual payloads from BOTS v1 JSON (120GB raw).
-* **CI/CD:** GitHub Actions (Unit Tests & Container Builds).
-* **Serving:** FastAPI wrapped in Docker (AWS Lambda compatible).
-
----
-
-## Directory Structure
-
-The repository organizes the progression from **First Principles** to **Production Cloud Infrastructure**:
+## Repository structure
 
 ```text
 cyber-nano-gpt/
-├── .github/workflows/           # CI/CD Pipelines (Test & Build)
-├── data/                        # Real-world datasets (LogHub, EVTX, Atomic Red Team)
-├── deploy/                      # Dockerfiles & Terraform (Infrastructure as Code)
-├── scripts/                     # Data pipelines, Tokenizer training, Utilities
-├── src/
-│   ├── api/                     # FastAPI Inference Server (The "Guard")
-│   ├── model/                   # Production PyTorch Transformer architecture
-│   ├── rag/                     # LangChain/VectorDB Agent (The "Detective")
-│   ├── scratch_implementations/ # Educational: Manual NumPy & Raw PyTorch, Tensorflow attention
-│   ├── training/                # Training loops (Pre-training & SFT)
-│   └── rl/                      # Alignment: DPO implementation
-└── tests/                       # Unit tests for shape verification
+├── .dvc/          # data versioning configuration
+├── config/        # experiment and preprocessing configuration
+├── data/raw/      # raw input data references
+├── doc/           # notes and supporting documentation
+├── notebooks/     # exploratory analysis and prototyping
+├── scripts/       # preprocessing and utility scripts
+├── src/           # core source code
+├── README.md
+└── LICENSE
+```
+
+## Planned next
+
+- Run a clean end-to-end baseline training pipeline.
+- Evaluate next-token prediction behavior on held-out telemetry data.
+- Test whether token-level surprise or perplexity can serve as a useful anomaly signal.
+- Improve result reporting and experiment documentation.
+
+## Possible extensions
+
+These are later-stage ideas, not current core claims:
+
+- Add a lightweight explanation layer for flagged sequences after the baseline modeling pipeline is stable.
+- Explore retrieval-augmented analysis using external security knowledge as an optional downstream extension.
+
+## Notes
+
+This repository is intended to reflect the current implementation state of the project. Planned extensions are listed separately from the components already built.
