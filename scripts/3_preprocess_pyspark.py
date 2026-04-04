@@ -47,6 +47,12 @@ def main():
 
     hadoop_conf.set("fs.s3a.aws.credentials.provider", "org.apache.hadoop.fs.s3a.AnonymousAWSCredentialsProvider")
 
+    # [NEW] Windows Local Write Fix
+    # Tells Hadoop to use a "Raw" filesystem that doesn't call Windows native access0()
+    hadoop_conf.set("fs.file.impl", "org.apache.hadoop.fs.RawLocalFileSystem")
+    
+    hadoop_conf.set("fs.s3a.aws.credentials.provider", "org.apache.hadoop.fs.s3a.AnonymousAWSCredentialsProvider")
+
     # =============================================================================
     # 2. DATA INGESTION (LAZY EVALUATION)
     # =============================================================================
@@ -61,7 +67,12 @@ def main():
     # 3. FEATURE DIMENSIONALITY REDUCTION (19 kept, 61 dropped)
     # =============================================================================
     # DROP RATIONALE:
-    # 1. Temporal/Spatial Bias: 'Timestamp', 'Source IP'. Model will memorize time/location instead of behavior.
+    # 1. Temporal/Spatial Bias: 'Timestamp(X)', 'Source IP'. Model will memorize time/location instead of behavior.
+    #    -> Added 'Timestamp' back to target_cols.
+    #       While the model must not learn temporal bias, we retain it for:
+    #       1. Physical Sorting: Necessary for repartitionByRange.
+    #       2. Observability: Post-ETL audit to verify if the global sequence order (by timestamp) is intact.
+    #
     # 2. Multicollinearity (100% Correlation): 'Subflow *' exactly duplicates 'Tot *'. 'Fwd Seg Size Avg' == 'Fwd Pkt Len Mean'.
     # 3. Structural Redundancy: 'Fwd/Bwd IAT *' metrics are mathematical derivatives of 'Flow Duration' and 'Flow IAT'.
     # 4. Zero Variance / Extreme Sparsity: 'URG/CWE/ECE' flags. 'Active/Idle' metrics (only exist in long-polling sessions, blank otherwise). 
@@ -69,6 +80,7 @@ def main():
     
     # KEEP RATIONALE: Core markers of volumetric attacks, beaconing, and protocol violations.
     target_cols = [
+        "Timestamp",
         "Dst Port", "Protocol", "Flow Duration", "Tot Fwd Pkts", "Tot Bwd Pkts", 
         "TotLen Fwd Pkts", "TotLen Bwd Pkts", "Flow Byts/s", "Flow Pkts/s", 
         "Fwd Pkt Len Max", "Fwd Pkt Len Mean", "Flow IAT Mean", "Flow IAT Max", 
@@ -78,7 +90,11 @@ def main():
     ]
     
     # Cast variables to double for log10 operations. Drops corrupted rows.
-    df_clean = df.select([col(c).cast("double").alias(c) if c != "Label" else col(c) for c in target_cols]).dropna()
+    # Also ensure Timestamp is preserved for sorting, while others are cast for log-binning.
+    df_clean = df.select([
+        col(c).cast("double").alias(c) if c not in ["Label", "Timestamp"] else col(c) 
+        for c in target_cols
+    ]).dropna()
 
     # =============================================================================
     # 4. SERIALIZATION & DISCRETIZATION
@@ -95,7 +111,19 @@ def main():
         # Direct string casting for discrete identifiers/flags (e.g., [PORT_443], [SYN_1]).
         return concat(lit(f"[{prefix}_"), col(column_name).cast("int"), lit("]"))
 
-    # Sequence Ordering: Context flows from Macro (Identifiers & Volume) -> Micro (Timing) -> State (Flags)
+    # -----------------------------------------------------------------------------
+    # DESIGN HEURISTIC: Sequence Ordering (Macro -> Micro -> State)
+    # Rationale: Features are structured to flow from a global (macro) context 
+    # to a local/terminal (micro) state to provide the model with broad behavioral 
+    # context before narrower status cues.
+    #
+    # 1. Macro (Identifiers & Volume): PORT, PROTO, DUR, and Volume metrics 
+    #    define the general type and scale of the connection.
+    # 2. Micro (Timing): IAT metrics allow the observation of detailed temporal 
+    #    patterns (e.g., beaconing) once the broad context is established.
+    # 3. State (Flags): TCP flags represent terminal state/signals, layered 
+    #    on top of the previously established behavioral context.
+    # -----------------------------------------------------------------------------
     tokens = [
         raw_token("PORT", "Dst Port"),
         raw_token("PROTO", "Protocol"),
@@ -121,7 +149,31 @@ def main():
     ]
 
     # Materialize the 1D sequence using space delimiter.
-    df_final = df_clean.withColumn("Sequence", concat_ws(" ", *tokens)).select("Sequence", "Label")
+    # -----------------------------------------------------------------------------
+    # ARCHITECTURAL DECISION: Range-Based Distributed Sorting
+    #
+    # repartitionByRange(10, "Timestamp"):
+    #   - Shard count (10) optimized for 350MB dataset (~35MB/file). Avoids HDFS 
+    #     'Small File' metadata overhead while ensuring enough parallel tasks 
+    #     for the PyTorch DataLoader (num_workers=2).
+    #   - Range partitioning (vs Hash) ensures Partition_N <= Partition_N+1 
+    #     chronologically. Critical for preserving global temporal order in 
+    #     Transformer-based sequence modeling.
+    #
+    # sortWithinPartitions("Timestamp"):
+    #   - Eliminates the driver-node bottleneck and OOM risk seen with global 
+    #     orderBy() when scaling to SOC-scale (Terabyte) logs.
+    #   - Uses "Divide and Conquer": Range partitioning isolates time-windows, 
+    #     then local O(N log N) sorts finalize the global sequence with 
+    #     linear scalability.
+    #
+    # Verification: 'Timestamp' column is persisted in the CSV as a physical 
+    # audit trail to deterministically verify sort integrity post-ETL.
+    # -----------------------------------------------------------------------------
+    df_final = df_clean.withColumn("Sequence", concat_ws(" ", *tokens)) \
+        .repartitionByRange(10, "Timestamp") \
+        .sortWithinPartitions("Timestamp") \
+        .select("Sequence", "Label", "Timestamp")
 
     # =============================================================================
     # 5. I/O EXECUTION (ACTION TRIGGERS)
@@ -139,9 +191,15 @@ def main():
     # Action 2: Triggers full DAG. Pulls from S3 -> RAM -> Transforms -> Writes to local SSD.
     # You can view the physical output files (CSV/TXT) in the OUTPUT_DIR path.
     # These files are the actual dataset that PyTorch will ingest.
-    print(f"\n>>> 4. Serializing to Physical Disk: {OUTPUT_DIR}")
-    df_final.write.mode("overwrite").option("header", "true").csv(OUTPUT_DIR)
-    print(">>> I/O Write Complete.")
+    print(f"\n>>> 4. Serializing Global-Sorted Partitions to Physical Disk: {OUTPUT_DIR}")
+    # df_final.write.mode("overwrite").option("header", "true").csv(OUTPUT_DIR)
+    df_final.write.mode("overwrite") \
+        .option("header", "true") \
+        .option("quote", "\"") \
+        .option("escape", "\"") \
+        .csv(OUTPUT_DIR)
+
+    print(">>> I/O Write Complete. Data is now Scalable, Global-Sorted, and Verifiable.")
 
     spark.stop()
 
