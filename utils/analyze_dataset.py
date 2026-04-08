@@ -43,7 +43,7 @@ def run_full_analysis(data_dir, block_size_tokens=256, tokens_per_row=20):
     print("\n" + "="*50)
     print(">>> [AUDIT 3] Contiguous Benign Blocks (Micro-Continuity):")
     
-    # 병목 방지를 위해 Timestamp와 Label만 추출하여 Pandas로 전환
+    # Extract only Timestamp and Label and convert to Pandas to prevent bottlenecks.
     pdf = df.select("Timestamp", "Label").toPandas()
     pdf['Timestamp'] = pd.to_datetime(pdf['Timestamp'])
     pdf = pdf.sort_values('Timestamp').reset_index(drop=True)
