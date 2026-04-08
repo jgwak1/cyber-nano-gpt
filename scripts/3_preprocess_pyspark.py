@@ -2,6 +2,8 @@ import os
 import shutil
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, log10, floor, concat_ws, lit, concat
+from pyspark.sql.functions import lag, sum as _sum, count as _count, coalesce
+from pyspark.sql.window import Window
 
 # =============================================================================
 # 1. INFRASTRUCTURE & ENVIRONMENT HARDENING
@@ -96,6 +98,49 @@ def main():
         for c in target_cols
     ]).dropna()
 
+
+    # =============================================================================
+    # 3.5. CONTINUOUS BLOCK EXTRACTION (HARD BOUNDARY RESET)
+    # =============================================================================
+    # ARCHITECTURAL DECISION: Micro-Continuity Enforcement
+    # Rationale: The Transformer requires a continuous temporal sequence to learn causality.
+    # Interleaved 'Bot' traffic breaks this causality. Instead of simple filtering which 
+    # creates hidden temporal gaps, we identify isolated 'islands' of pure Benign traffic.
+    #
+    # DEFINITION OF VALID BLOCK:
+    # 1. Model context window (block_size) = 256 tokens.
+    # 2. 1 Row (network session) = ~20 tokens.
+    # 3. Minimum rows needed to form 1 valid batch = ceil(256 / 20) = 13 rows.
+    # 4. Any block < 13 rows is dropped as "Sub-batch Fragment" (Noise) to prevent 
+    #    gradient updates on broken/incomplete contexts.
+
+    
+    # Gaps and Islands Algorithm for Sequence Integrity
+    #  -> Calculate a cumulative sum that increments by 1 whenever the Label (state) changes between the previous and current row.
+    #     This assigns a unique, independent ID (block_id) to each contiguous 'Island' of Benign traffic that was fractured by Bot interventions.
+
+    # 1. Define chronological order window
+    window_spec = Window.orderBy("Timestamp")
+
+    # 2. Identify label transitions (Benign <-> Bot)
+    df_clean = df_clean.withColumn("prev_label", lag("Label", 1).over(window_spec))
+    df_clean = df_clean.withColumn("is_diff", (col("Label") != col("prev_label")).cast("int"))
+    df_clean = df_clean.withColumn("is_diff", coalesce(col("is_diff"), lit(0)))
+
+    # 3. Assign unique block_id using cumulative sum of transitions
+    df_clean = df_clean.withColumn("block_id", _sum("is_diff").over(window_spec))
+
+    # 4. Isolate Benign blocks
+    df_benign = df_clean.filter(col("Label") == "Benign")
+
+    # 5. Enforce minimum batch size threshold (>= 13 rows)
+    block_window = Window.partitionBy("block_id")
+    df_final = df_benign.withColumn("block_size", _count("*").over(block_window)) \
+                        .filter(col("block_size") >= 13)
+
+    # Clean up intermediate algorithmic columns
+    df_final = df_final.drop("prev_label", "is_diff", "block_size")
+
     # =============================================================================
     # 4. SERIALIZATION & DISCRETIZATION
     # =============================================================================
@@ -170,10 +215,10 @@ def main():
     # Verification: 'Timestamp' column is persisted in the CSV as a physical 
     # audit trail to deterministically verify sort integrity post-ETL.
     # -----------------------------------------------------------------------------
-    df_final = df_clean.withColumn("Sequence", concat_ws(" ", *tokens)) \
+    df_final = df_final.withColumn("Sequence", concat_ws(" ", *tokens)) \
         .repartitionByRange(10, "Timestamp") \
         .sortWithinPartitions("Timestamp") \
-        .select("Sequence", "Label", "Timestamp")
+        .select("Timestamp", "block_id", "Label", "Sequence")
 
     # =============================================================================
     # 5. I/O EXECUTION (ACTION TRIGGERS)
@@ -185,8 +230,8 @@ def main():
     df_final.show(10, truncate=False)
 
     # I/O cleanup to prevent PySpark write collisions.
-    if os.path.exists(OUTPUT_DIR):
-        shutil.rmtree(OUTPUT_DIR)
+    # if os.path.exists(OUTPUT_DIR):
+    #     shutil.rmtree(OUTPUT_DIR)
 
     # Action 2: Triggers full DAG. Pulls from S3 -> RAM -> Transforms -> Writes to local SSD.
     # You can view the physical output files (CSV/TXT) in the OUTPUT_DIR path.
@@ -200,6 +245,7 @@ def main():
         .csv(OUTPUT_DIR)
 
     print(">>> I/O Write Complete. Data is now Scalable, Global-Sorted, and Verifiable.")
+
 
     spark.stop()
 

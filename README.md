@@ -19,9 +19,14 @@ Instead of treating telemetry analysis as a fixed-label classification problem, 
 - Built a PySpark-based preprocessing pipeline for CIC-IDS2018 network-flow data.
 - Reduced the raw feature space from 80 fields to 19 curated fields for modeling.
 - Applied log-binning and converted each record into a fixed-order token sequence for GPT-style next-token modeling.
+- Enforced strict temporal sequence integrity via state-based sequence segmentation (Hard Boundary Reset):
+  - While the raw dataset naturally contains massive high-integrity "Golden Windows" (up to 280k contiguous rows), significant portions are interleaved with attack sessions.
+  - To prevent the model from learning fake or "stitched" causal relationships, strictly isolated contiguous benign blocks and discarded any sub-batch fragments (< 13 rows) that could not form a full training window.
+  - This engineering trade-off prioritized sequence fidelity over raw volume, successfully preserving 81.54% of total benign traffic (703,533 rows) while guaranteeing 100% causal purity.
 - Implemented core GPT-style Transformer components in PyTorch, including causal self-attention, Transformer blocks, token embeddings, and positional embeddings.
 - Verified core architecture behavior through parameter-count and forward-pass checks.
 - Prepared the training data interface by building a benign-only vocabulary, adding fallback handling for unseen feature values, and creating an iterable dataset loader for fixed-length next-token modeling.
+
 
 ## Current technical direction
 

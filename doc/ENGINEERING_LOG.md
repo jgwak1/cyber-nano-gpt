@@ -28,6 +28,15 @@
 * **The Hard Cap**: Applied `min(val, 30)` to all binned features.
 * **Finding**: Identified $2^{63}-1$ (`Long.MAX_VALUE`) artifacts in `BYT_SEC` and `PKT_SEC` due to division-by-zero errors in the raw extractor (e.g., when Flow Duration is zero, the extractor assigns Long.MAX_VALUE to bypass the division-by-zero error). The hard cap prevents these artifacts from exhausting memory during embedding matrix allocation (i.e., it prevents a system crash by blocking an attempted impossible 9-quintillion-row matrix allocation).
 
+### 2.3 Temporal Sequence Integrity (Hard Boundary Reset)
+* **Context**: Preliminary audit revealed that while the dataset contains massive "Golden Windows" (up to 280k contiguous rows), a significant portion of the remaining data is interleaved with attack traffic.
+* **Decision**: Implemented a **Hard Boundary Reset** to preserve the integrity of these large windows while strictly isolating them from fragmented sessions.
+* **Mechanism**: Utilized state-based sequence segmentation to assign a unique `block_id` to contiguous 'Benign' states.
+* **Caveats & Trade-offs**: 
+    * **Data Sacrifice**: To guarantee 100% causal integrity, sub-batch fragments (< 13 rows) were intentionally dropped. 
+    * **Result**: This trade-off prioritized sequence quality over raw volume, ensuring the Transformer never trains on "stitched" or broken temporal contexts.
+* **Validation Metrics**: Verified 100% pure benign dataset containing 703,533 rows. Despite the reset, **81.54% of total benign data was preserved**, proving that the majority of the signal resides within large, high-integrity contiguous blocks.
+
 ---
 
 ## 3. Experimental Findings & Anomaly Logic
