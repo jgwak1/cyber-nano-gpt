@@ -28,8 +28,20 @@ if __name__ == "__main__":
     main()
 
 
-# python3 C:\Users\jgwak\OneDrive\Desktop\cyber-nano-gpt\dev\check_diff.py       
-# >>> Identified 24 Malware-Only Tokens:
+
+# =============================================================================
+# DEPRECATED OUTPUT LOG
+# =============================================================================
+# The following output is outdated and no longer applicable.
+# Reason: In the current architecture, 3_preprocess_pyspark.py enforces a strict 
+# physical isolation of normal behavior (df_clean.filter(col("Label") == "Benign")). 
+# Because the exported CSV partitions now contain exactly 0% malicious traffic, 
+# building a vocabulary on these files inherently yields 0 malware-only tokens. 
+# The 24 anomalous [D_U_RATIO_*] tokens logged below are artifacts from an earlier 
+# pipeline version where malicious sequences were not physically excluded from the disk.
+
+#(X) python3 C:\Users\jgwak\OneDrive\Desktop\cyber-nano-gpt\dev\check_diff.py       
+#(X) >>> Identified 24 Malware-Only Tokens:
 #     - [D_U_RATIO_22]
 #     - [D_U_RATIO_23]
 #     - [D_U_RATIO_24]
@@ -53,4 +65,4 @@ if __name__ == "__main__":
 #     - [D_U_RATIO_45]
 #     - [D_U_RATIO_51]
 #     - [D_U_RATIO_53]
-#     - [D_U_RATIO_55]    
+#     - [D_U_RATIO_55]

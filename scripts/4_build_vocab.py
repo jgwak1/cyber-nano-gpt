@@ -66,16 +66,21 @@ def main():
             
             for row in reader:
                 if not row: continue
-                sequence = row[0]
-                label = row[1]                
+                #sequence = row[0]
+                #label = row[1]                
                 
+                label = row[2]
+                sequence = row[3]
+
                 total_seqs += 1
-                
-                # Strict Isolation of Normal Behavior.
-                # Vocabulary MUST NOT contain artifacts unique to malicious traffic.
+                    
+                # [Sanity Check] Defensive Guardrail: Ensure only Benign data enters the vocab to maintain model purity.
+                # Redundant as Spark already filters this, but retained for upstream logic safety.
+                # NOTE: If '==' is used (skipping all 100% benign rows), vocab size will be exactly 32.
+                # (32 = 1 [SEP] + 19 [UNKs] + 12 [Zero-bins for continuous features]).
                 if label != "Benign":
                     continue
-                    
+
                 benign_seqs += 1
 
 
