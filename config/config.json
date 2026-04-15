@@ -1,8 +1,8 @@
 {
   "model_type": "gpt2",
-  "vocab_size": 50257,
-  "n_positions": 512,
-  "n_embd": 512,
+  "vocab_size": 35037,
+  "n_positions": 256,
+  "n_embd": 256,
   "n_layer": 10,
   "n_head": 8,
   "activation_function": "gelu_new",
@@ -11,6 +11,6 @@
   "attn_pdrop": 0.1,
   "layer_norm_epsilon": 1e-5,
   "initializer_range": 0.02,
-  "bos_token_id": 50256,
-  "eos_token_id": 50256
+  "bos_token_id": 0,
+  "eos_token_id": 0
 }
