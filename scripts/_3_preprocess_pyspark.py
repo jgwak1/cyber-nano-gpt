@@ -1,0 +1,253 @@
+import os
+import shutil
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, log10, floor, concat_ws, lit, concat
+from pyspark.sql.functions import lag, sum as _sum, count as _count, coalesce
+from pyspark.sql.window import Window
+
+# =============================================================================
+# 1. INFRASTRUCTURE & ENVIRONMENT HARDENING
+# =============================================================================
+# Hard-injecting paths. PySpark uses Py4J to spawn JVMs, making JAVA_HOME mandatory.
+# On Windows, Hadoop's winutils.exe acts as a required POSIX bridge to interact with S3.
+JAVA_HOME_PATH = r"C:\Program Files\Microsoft\jdk-17.0.18.8-hotspot"
+HADOOP_HOME_PATH = r"C:\hadoop"
+SPARK_TEMP_DIR = r"C:\spark_temp"
+
+os.environ["JAVA_HOME"] = JAVA_HOME_PATH
+os.environ["HADOOP_HOME"] = HADOOP_HOME_PATH
+
+# Physical disk target for the final serialized tokens.
+OUTPUT_DIR = r"C:\Users\jgwak\OneDrive\Desktop\cyber-nano-gpt\data\processed\nano_gpt_sequences"
+
+def main():
+    # -------------------------------------------------------------------------
+    # ARCHITECTURAL DECISION: Why Spark for a 350MB CSV?
+    # Context: Pandas can easily process 350MB in-memory on a single node.
+    # Justification: This is a design-for-scalability choice. In an actual SOC environment, 
+    # network flows (NetFlow/PCAP) generate Terabytes of logs daily. 
+    # Building this on Spark ensures the ETL pipeline is horizontally scalable across 
+    # distributed clusters (e.g., YARN, EMR, Kubernetes) with zero code refactoring.
+    # -------------------------------------------------------------------------
+    spark = SparkSession.builder \
+        .appName("CyberNanoGPT-Preprocessing") \
+        .config("spark.driver.memory", "6g") \
+        .config("spark.jars.packages", "org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262") \
+        .config("spark.local.dir", SPARK_TEMP_DIR) \
+        .getOrCreate()
+
+    # Override S3A defaults. Bypasses Hadoop string parsing bugs ("24h" -> 86400) 
+    # and forces anonymous access for public buckets.
+    hadoop_conf = spark.sparkContext._jsc.hadoopConfiguration()
+    
+    # Monkey-Patches for now
+    hadoop_conf.set("fs.s3a.multipart.purge.age", "86400") 
+    hadoop_conf.set("fs.s3a.threads.keepalivetime", "60")
+    hadoop_conf.set("fs.s3a.connection.establish.timeout", "5000")
+    hadoop_conf.set("fs.s3a.connection.timeout", "200000")
+    hadoop_conf.set("fs.s3a.connection.request.timeout", "60000")
+
+    hadoop_conf.set("fs.s3a.aws.credentials.provider", "org.apache.hadoop.fs.s3a.AnonymousAWSCredentialsProvider")
+
+    # [NEW] Windows Local Write Fix
+    # Tells Hadoop to use a "Raw" filesystem that doesn't call Windows native access0()
+    hadoop_conf.set("fs.file.impl", "org.apache.hadoop.fs.RawLocalFileSystem")
+    
+    hadoop_conf.set("fs.s3a.aws.credentials.provider", "org.apache.hadoop.fs.s3a.AnonymousAWSCredentialsProvider")
+
+    # =============================================================================
+    # 2. DATA INGESTION (LAZY EVALUATION)
+    # =============================================================================
+    S3A_PATH = "s3a://cse-cic-ids2018/Processed Traffic Data for ML Algorithms/Friday-02-03-2018_TrafficForML_CICFlowMeter.csv"
+    print(">>> 1. Building DAG for S3 ingestion...")
+    
+    # Spark Lazy Evaluation: This does NOT load data into RAM. 
+    # It only fetches the schema to construct the Directed Acyclic Graph (DAG) for future execution.
+    df = spark.read.csv(S3A_PATH, header=True, inferSchema=True)
+
+    # =============================================================================
+    # 3. FEATURE DIMENSIONALITY REDUCTION (19 kept, 61 dropped)
+    # =============================================================================
+    # DROP RATIONALE:
+    # 1. Temporal/Spatial Bias: 'Timestamp(X)', 'Source IP'. Model will memorize time/location instead of behavior.
+    #    -> Added 'Timestamp' back to target_cols.
+    #       While the model must not learn temporal bias, we retain it for:
+    #       1. Physical Sorting: Necessary for repartitionByRange.
+    #       2. Observability: Post-ETL audit to verify if the global sequence order (by timestamp) is intact.
+    #
+    # 2. Multicollinearity (100% Correlation): 'Subflow *' exactly duplicates 'Tot *'. 'Fwd Seg Size Avg' == 'Fwd Pkt Len Mean'.
+    # 3. Structural Redundancy: 'Fwd/Bwd IAT *' metrics are mathematical derivatives of 'Flow Duration' and 'Flow IAT'.
+    # 4. Zero Variance / Extreme Sparsity: 'URG/CWE/ECE' flags. 'Active/Idle' metrics (only exist in long-polling sessions, blank otherwise). 
+    #                                      'Fwd Pkt Len Min' (fixed TCP header size).
+    
+    # KEEP RATIONALE: Core markers of volumetric attacks, beaconing, and protocol violations.
+    target_cols = [
+        "Timestamp",
+        "Dst Port", "Protocol", "Flow Duration", "Tot Fwd Pkts", "Tot Bwd Pkts", 
+        "TotLen Fwd Pkts", "TotLen Bwd Pkts", "Flow Byts/s", "Flow Pkts/s", 
+        "Fwd Pkt Len Max", "Fwd Pkt Len Mean", "Flow IAT Mean", "Flow IAT Max", 
+        "SYN Flag Cnt", "ACK Flag Cnt", "FIN Flag Cnt", "RST Flag Cnt", 
+        "Init Fwd Win Byts", "Down/Up Ratio", 
+        "Label" # ground-truth
+    ]
+    
+    # Cast variables to double for log10 operations. Drops corrupted rows.
+    # Also ensure Timestamp is preserved for sorting, while others are cast for log-binning.
+    df_clean = df.select([
+        col(c).cast("double").alias(c) if c not in ["Label", "Timestamp"] else col(c) 
+        for c in target_cols
+    ]).dropna()
+
+
+    # =============================================================================
+    # 3.5. CONTINUOUS BLOCK EXTRACTION (HARD BOUNDARY RESET)
+    # =============================================================================
+    # ARCHITECTURAL DECISION: Micro-Continuity Enforcement
+    # Rationale: The Transformer requires a continuous temporal sequence to learn causality.
+    # Interleaved 'Bot' traffic breaks this causality. Instead of simple filtering which 
+    # creates hidden temporal gaps, we identify isolated 'islands' of pure Benign traffic.
+    #
+    # DEFINITION OF VALID BLOCK:
+    # 1. Model context window (block_size) = 256 tokens.
+    # 2. 1 Row (network session) = ~20 tokens.
+    # 3. Minimum rows needed to form 1 valid batch = ceil(256 / 20) = 13 rows.
+    # 4. Any block < 13 rows is dropped as "Sub-batch Fragment" (Noise) to prevent 
+    #    gradient updates on broken/incomplete contexts.
+
+    
+    # Gaps and Islands Algorithm for Sequence Integrity
+    #  -> Calculate a cumulative sum that increments by 1 whenever the Label (state) changes between the previous and current row.
+    #     This assigns a unique, independent ID (block_id) to each contiguous 'Island' of Benign traffic that was fractured by Bot interventions.
+
+    # 1. Define chronological order window
+    window_spec = Window.orderBy("Timestamp")
+
+    # 2. Identify label transitions (Benign <-> Bot)
+    df_clean = df_clean.withColumn("prev_label", lag("Label", 1).over(window_spec))
+    df_clean = df_clean.withColumn("is_diff", (col("Label") != col("prev_label")).cast("int"))
+    df_clean = df_clean.withColumn("is_diff", coalesce(col("is_diff"), lit(0)))
+
+    # 3. Assign unique block_id using cumulative sum of transitions
+    df_clean = df_clean.withColumn("block_id", _sum("is_diff").over(window_spec))
+
+    # 4. Isolate Benign blocks
+    df_benign = df_clean.filter(col("Label") == "Benign")
+
+    # 5. Enforce minimum batch size threshold (>= 13 rows)
+    block_window = Window.partitionBy("block_id")
+    df_final = df_benign.withColumn("block_size", _count("*").over(block_window)) \
+                        .filter(col("block_size") >= 13)
+
+    # Clean up intermediate algorithmic columns
+    df_final = df_final.drop("prev_label", "is_diff", "block_size")
+
+    # =============================================================================
+    # 4. SERIALIZATION & DISCRETIZATION
+    # =============================================================================
+    print(">>> 2. Constructing Serialization Map...")
+    
+    def bin_token(prefix, column_name):
+        # Log-binning. Compresses continuous scale into discrete order-of-magnitude tokens 
+        # to restrict vocabulary explosion in the LLM embedding layer.
+        # e.g., 15300 bytes -> log10(15301) -> 4.18 -> floor() -> [FWD_BYT_4]
+        return concat(lit(f"[{prefix}_"), floor(log10(col(column_name) + 1)), lit("]"))
+        
+    def raw_token(prefix, column_name):
+        # Direct string casting for discrete identifiers/flags (e.g., [PORT_443], [SYN_1]).
+        return concat(lit(f"[{prefix}_"), col(column_name).cast("int"), lit("]"))
+
+    # -----------------------------------------------------------------------------
+    # DESIGN HEURISTIC: Sequence Ordering (Macro -> Micro -> State)
+    # Rationale: Features are structured to flow from a global (macro) context 
+    # to a local/terminal (micro) state to provide the model with broad behavioral 
+    # context before narrower status cues.
+    #
+    # 1. Macro (Identifiers & Volume): PORT, PROTO, DUR, and Volume metrics 
+    #    define the general type and scale of the connection.
+    # 2. Micro (Timing): IAT metrics allow the observation of detailed temporal 
+    #    patterns (e.g., beaconing) once the broad context is established.
+    # 3. State (Flags): TCP flags represent terminal state/signals, layered 
+    #    on top of the previously established behavioral context.
+    # -----------------------------------------------------------------------------
+    tokens = [
+        raw_token("PORT", "Dst Port"),
+        raw_token("PROTO", "Protocol"),
+        bin_token("DUR", "Flow Duration"),
+        bin_token("FWD_PKT", "Tot Fwd Pkts"),
+        bin_token("BWD_PKT", "Tot Bwd Pkts"),
+        bin_token("FWD_BYT", "TotLen Fwd Pkts"),
+        bin_token("BWD_BYT", "TotLen Bwd Pkts"),
+        bin_token("BYT_SEC", "Flow Byts/s"),
+        bin_token("PKT_SEC", "Flow Pkts/s"),
+        bin_token("MAX_LEN", "Fwd Pkt Len Max"),
+        bin_token("MEAN_LEN", "Fwd Pkt Len Mean"),
+        bin_token("IAT_MEAN", "Flow IAT Mean"),
+        bin_token("IAT_MAX", "Flow IAT Max"),
+        bin_token("WIN", "Init Fwd Win Byts"),
+        raw_token("D_U_RATIO", "Down/Up Ratio"),
+        raw_token("SYN", "SYN Flag Cnt"),
+        raw_token("ACK", "ACK Flag Cnt"),
+        raw_token("FIN", "FIN Flag Cnt"),
+        raw_token("RST", "RST Flag Cnt"),
+        # Boundary token. Critical to prevent cross-attention bleeding between independent sessions.
+        lit("[SEP]") 
+    ]
+
+    # Materialize the 1D sequence using space delimiter.
+    # -----------------------------------------------------------------------------
+    # ARCHITECTURAL DECISION: Range-Based Distributed Sorting
+    #
+    # repartitionByRange(10, "Timestamp"):
+    #   - Shard count (10) optimized for 350MB dataset (~35MB/file). Avoids HDFS 
+    #     'Small File' metadata overhead while ensuring enough parallel tasks 
+    #     for the PyTorch DataLoader (num_workers=2).
+    #   - Range partitioning (vs Hash) ensures Partition_N <= Partition_N+1 
+    #     chronologically. Critical for preserving global temporal order in 
+    #     Transformer-based sequence modeling.
+    #
+    # sortWithinPartitions("Timestamp"):
+    #   - Eliminates the driver-node bottleneck and OOM risk seen with global 
+    #     orderBy() when scaling to SOC-scale (Terabyte) logs.
+    #   - Uses "Divide and Conquer": Range partitioning isolates time-windows, 
+    #     then local O(N log N) sorts finalize the global sequence with 
+    #     linear scalability.
+    #
+    # Verification: 'Timestamp' column is persisted in the CSV as a physical 
+    # audit trail to deterministically verify sort integrity post-ETL.
+    # -----------------------------------------------------------------------------
+    df_final = df_final.withColumn("Sequence", concat_ws(" ", *tokens)) \
+        .repartitionByRange(10, "Timestamp") \
+        .sortWithinPartitions("Timestamp") \
+        .select("Timestamp", "block_id", "Label", "Sequence")
+
+    # =============================================================================
+    # 5. I/O EXECUTION (ACTION TRIGGERS)
+    # =============================================================================
+    # df_final currently exists ONLY as a logical DAG. It is NOT in RAM or on Disk.
+    
+    # Action 1: Triggers the DAG. Loads subset into RAM, processes it, and prints to console.
+    print("\n>>> 3. Console Output (Volatile Memory):")
+    df_final.show(10, truncate=False)
+
+    # I/O cleanup to prevent PySpark write collisions.
+    # if os.path.exists(OUTPUT_DIR):
+    #     shutil.rmtree(OUTPUT_DIR)
+
+    # Action 2: Triggers full DAG. Pulls from S3 -> RAM -> Transforms -> Writes to local SSD.
+    # You can view the physical output files (CSV/TXT) in the OUTPUT_DIR path.
+    # These files are the actual dataset that PyTorch will ingest.
+    print(f"\n>>> 4. Serializing Global-Sorted Partitions to Physical Disk: {OUTPUT_DIR}")
+    # df_final.write.mode("overwrite").option("header", "true").csv(OUTPUT_DIR)
+    df_final.write.mode("overwrite") \
+        .option("header", "true") \
+        .option("quote", "\"") \
+        .option("escape", "\"") \
+        .csv(OUTPUT_DIR)
+
+    print(">>> I/O Write Complete. Data is now Scalable, Global-Sorted, and Verifiable.")
+
+
+    spark.stop()
+
+if __name__ == "__main__":
+    main()
