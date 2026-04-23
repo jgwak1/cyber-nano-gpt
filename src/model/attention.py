@@ -46,29 +46,41 @@ class CausalSelfAttentionPyTorch(nn.Module):
         k = k.view(B, T, self.n_head, self.head_dim).permute(0, 2, 1, 3)
         v = v.view(B, T, self.n_head, self.head_dim).permute(0, 2, 1, 3)
 
-        # 4. SCALED DOT-PRODUCT ATTENTION
-        # TODO: Could utilize "F.scaled_dot_product_attention"
-        #       for FlashAttention speedup on RTX 4000. 
-        # (B, h, T, hs) @ (B, h, hs, T) -> (B, h, T, T)
-        att = (q @ k.transpose(-2, -1)) * self.scale
+        # ==============================================================================
+        # [ARCHIVED] Standard Scaled Dot-Product Attention (Mathematical Reference)
+        # ==============================================================================
+        # # 4. SCALED DOT-PRODUCT ATTENTION
+        # # DONE: Could utilize "F.scaled_dot_product_attention"
+        # #       for FlashAttention speedup on RTX 4000. 
+        # # (B, h, T, hs) @ (B, h, hs, T) -> (B, h, T, T)
+        # att = (q @ k.transpose(-2, -1)) * self.scale
+        #
+        # # 5. CAUSAL MASKING
+        # mask = torch.tril(torch.ones(T, T, device=x.device))
+        # # Apply Mask: Where mask is 0, set position to -inf.
+        # att = att.masked_fill(mask == 0, float('-inf'))
+        # 
+        # att = F.softmax(att, dim=-1)
+        # 
+        # # 6. Apply Attention Dropout
+        # # Drop values right after softmax ( Randomly zeroes out attention scores (i.e., edges in the graph).)
+        # # This prevents the model from being "too sure" about which previous word matters.
+        # # (e.g., Prevents the model from just looking at "France" to predict "Paris", forcing it to also attend to "capital" and "The".)
+        # att = self.attn_dropout(att)
+        # 
+        # # 7. AGGREGATE for Attention Outputs
+        # # (B, h, T, T) @ (B, h, T, hs) -> (B, h, T, hs)
+        # y = att @ v
+        # ==============================================================================
 
-        # 5. CAUSAL MASKING
-        mask = torch.tril(torch.ones(T, T, device=x.device))
-        
-        # Apply Mask: Where mask is 0, set position to -inf.
-        att = att.masked_fill(mask == 0, float('-inf'))
-        
-        att = F.softmax(att, dim=-1)
-
-        # 6. Apply Attention Dropout
-        # Drop values right after softmax ( Randomly zeroes out attention scores (i.e., edges in the graph).)
-        # This prevents the model from being "too sure" about which previous word matters.
-        # (e.g., Prevents the model from just looking at "France" to predict "Paris", forcing it to also attend to "capital" and "The".)
-        att = self.attn_dropout(att)
-
-        # 7. AGGREGATE for Attention Outputs
-        # (B, h, T, T) @ (B, h, T, hs) -> (B, h, T, hs)
-        y = att @ v
+        # 4-7. Memory and speed optimization via FlashAttention (PyTorch 2.0+).
+        # Fuses scale, causal mask, softmax, dropout, and aggregation into a single memory-efficient SRAM operation.
+        y = F.scaled_dot_product_attention(
+            q, k, v,
+            attn_mask=None,
+            dropout_p=self.attn_dropout.p if self.training else 0.0,
+            is_causal=True
+        )
 
         # 8. REASSEMBLE HEADS
         # Permute: [B, h, T, hs] -> [B, T, h, hs]
