@@ -6,7 +6,8 @@ import torch
 from torch.utils.data import IterableDataset, DataLoader
 
 class CyberDataset(IterableDataset):
-    def __init__(self, data_dir, vocab_path, config_path):
+    # def __init__(self, data_dir, vocab_path, config_path):
+    def __init__(self, file_list, vocab_path, config_path):
         """
         Custom Dataset for Cyber Log Sequences using Block-level buffering.
         """
@@ -17,7 +18,8 @@ class CyberDataset(IterableDataset):
             config = json.load(f)
             self.block_size = config['n_positions']
 
-        self.files = glob.glob(os.path.join(data_dir, "part-*.csv"))
+        # self.files = glob.glob(os.path.join(data_dir, "part-*.csv"))
+        self.files = file_list
 
     def tokenize_and_encode(self, sequence_str):
         """
@@ -98,23 +100,35 @@ class CyberDataset(IterableDataset):
             
             yield x, y
 
-def get_dataloader(data_dir, vocab_path, config_path, batch_size=32):
-    dataset = CyberDataset(data_dir, vocab_path, config_path)
-    # num_workers=0 is safer for initial debugging with IterableDataset
+
+def get_dataloader(file_list, vocab_path, config_path, batch_size=32):
+    """
+    Encapsulates DataLoader creation. Now accepts a specific file_list 
+    to support train/val splitting at the file level.
+    """
+    dataset = CyberDataset(file_list, vocab_path, config_path)
     return DataLoader(dataset, batch_size=batch_size, num_workers=0)
+
 
 if __name__ == "__main__":
     DATA_DIR = r"C:\Users\jgwak\OneDrive\Desktop\cyber-nano-gpt\data\processed\nano_gpt_sequences"
     VOCAB_PATH = r"C:\Users\jgwak\OneDrive\Desktop\cyber-nano-gpt\data\processed\vocab_only_benign.json"
     CONFIG_PATH = r"C:\Users\jgwak\OneDrive\Desktop\cyber-nano-gpt\config\config.json"
     
-    loader = get_dataloader(DATA_DIR, VOCAB_PATH, CONFIG_PATH)
+    all_files = sorted(glob.glob(os.path.join(DATA_DIR, "part-*.csv")))
+
+    # loader = get_dataloader(DATA_DIR, VOCAB_PATH, CONFIG_PATH)
     
-    print(">>> Sanity Check: Streaming Data Batches...")
-    for x, y in loader:
-        print(f"Batch X Shape: {x.shape}") # Expected: [batch_size, 256]
-        print(f"Batch Y Shape: {y.shape}") # Expected: [batch_size, 256]
-        # Shift Check: x[0, 1] must equal y[0, 0]
-        is_correct = torch.equal(x[0, 1:], y[0, :-1])
-        print(f"NTP Shift Integrity: {'PASS' if is_correct else 'FAIL'}")
-        break
+    if not all_files:
+        print(f">>> Error: No files found in {DATA_DIR}")
+    else:
+        loader = get_dataloader(all_files, VOCAB_PATH, CONFIG_PATH)        
+
+        print(">>> Sanity Check: Streaming Data Batches...")
+        for x, y in loader:
+            print(f"Batch X Shape: {x.shape}") # Expected: [batch_size, 256]
+            print(f"Batch Y Shape: {y.shape}") # Expected: [batch_size, 256]
+            # Shift Check: x[0, 1] must equal y[0, 0]
+            is_correct = torch.equal(x[0, 1:], y[0, :-1])
+            print(f"NTP Shift Integrity: {'PASS' if is_correct else 'FAIL'}")
+            break
